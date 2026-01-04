@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Golang WebRTC Whiteboard</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            text-align: center; 
+            background: #f0f2f5; 
+            margin: 0; padding: 20px;
+            user-select: none; 
+        }
+        h2 { color: #333; margin-bottom: 10px; }
+        
+        #canvas-container { 
+            position: relative; 
+            margin: 20px auto; 
+            width: 800px; height: 600px; 
+            background: white; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            border-radius: 12px;
+            cursor: crosshair; 
+            overflow: hidden;
+        }
+        canvas { display: block; }
+        
+        .toolbar {
+            background: white; padding: 10px 20px;
+            display: inline-flex; align-items: center; gap: 15px;
+            border-radius: 50px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+        .tool-group { display: flex; background: #eee; border-radius: 20px; padding: 4px; }
+        .tool-btn {
+            padding: 8px 15px; border: none; background: none;
+            cursor: pointer; border-radius: 16px; font-weight: bold; color: #555;
+            transition: all 0.2s;
+        }
+        .tool-btn.active { background: #2f3542; color: white; }
+
+        input[type="color"] { border: none; width: 35px; height: 35px; cursor: pointer; background: none; padding: 0;}
+        input[type="range"] { vertical-align: middle; width: 100px; }
+        .btn-clear { background-color: #ff4757; color: white; border: none; padding: 8px 15px; border-radius: 20px; cursor: pointer; font-weight: bold; }
+        .btn-clear:hover { background-color: #e84118; }
+        #status { font-weight: bold; color: #ffa502; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+
+    <h2>Whiteboard WebRTC</h2>
+    <div id="status">Connecting to server...</div>
+    
+    <div class="toolbar">
+        <div class="tool-group">
+            <button class="tool-btn active" onclick="selectTool('brush')" id="btn-brush">🖌️ Brush</button>
+            <button class="tool-btn" onclick="selectTool('eraser')" id="btn-eraser">🧹 Eraser</button>
+            <button class="tool-btn" onclick="selectTool('text')" id="btn-text">🔤 Text</button>
+        </div>
+
+        <div style="border-left: 1px solid #ccc; height: 30px;"></div>
+
+        <label>Color: <input type="color" id="colorPicker" value="#2f3542"></label>
+        <label>Size: <input type="range" id="sizeSlider" min="1" max="50" value="16"></label>
+        
+        <div style="border-left: 1px solid #ccc; height: 30px;"></div>
+        <button class="btn-clear" onclick="sendClearSignal()">Clear All</button>
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="whiteboard" width="800" height="600"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('whiteboard');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        const colorPicker = document.getElementById('colorPicker');
+        const sizeSlider = document.getElementById('sizeSlider'); 
+
+        let currentTool = 'brush'; 
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        let dc = null;
+
+        function selectTool(tool) {
+            currentTool = tool;
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(`btn-${tool}`).classList.add('active');
+            
+            if (tool === 'text') {
+                canvas.style.cursor = 'text';
+            } else {
+                canvas.style.cursor = 'crosshair';
+            }
+        }
+
+        // Setup WebRTC
+        const pc = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        dc = pc.createDataChannel("draw");
+
+        dc.onopen = () => {
+            statusDiv.textContent = "🟢 Connected"; statusDiv.style.color = "#2ed573";
+        };
+        dc.onclose = () => {
+            statusDiv.textContent = "🔴 Disconnected"; statusDiv.style.color = "#ff4757";
+        };
+
+        dc.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'draw') {
+                    drawLine(data.prevX, data.prevY, data.currX, data.currY, data.color, data.lineWidth);
+                } else if (data.type === 'text') {
+                    drawText(data.text, data.x, data.y, data.color, data.font);
+                } else if (data.type === 'clear') {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                }
+            } catch (e) { console.error("Error processing data:", e); }
+        };
+
+        async function start() {
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                const response = await fetch('/sdp', { method: 'POST', body: JSON.stringify(pc.localDescription) });
+                const answer = await response.json();
+                await pc.setRemoteDescription(answer);
+            } catch (err) { statusDiv.textContent = "Error: " + err; }
+        }
+        start();
+
+        
+        // Function Menggambar
+        function drawLine(x1, y1, x2, y2, color, lineWidth) {
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = lineWidth;
+            ctx.lineCap = 'round';
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+            ctx.closePath();
+        }
+
+        // Function Text
+        function drawText(text, x, y, color, font) {
+            ctx.save(); // Simpan state canvas sebelumnya agar tidak konflik
+            ctx.font = font;
+            ctx.fillStyle = color;
+            ctx.textBaseline = 'middle'; // Agar teks muncul pas di tengah kursor
+            ctx.fillText(text, x, y);
+            ctx.restore(); // Kembalikan state
+        }
+
+        function sendClearSignal() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (dc && dc.readyState === 'open') dc.send(JSON.stringify({ type: 'clear' }));
+        }
+
+        
+        // EVENT CLICK
+        canvas.addEventListener('click', (e) => {
+            if (currentTool !== 'text') return;
+
+            const clickX = e.offsetX;
+            const clickY = e.offsetY;
+
+            // Gunakan setTimeout kecil untuk memastikan UI browser siap
+            setTimeout(() => {
+                let textInput = prompt("Masukkan teks:", "");
+                if (textInput && textInput.trim() !== "") {
+                    const color = colorPicker.value;
+                    const fontSize = sizeSlider.value;
+                    const font = `bold ${fontSize}px Arial`;
+
+                    // Gambar Lokal
+                    drawText(textInput, clickX, clickY, color, font);
+
+                    // Kirim ke WebRTC
+                    if (dc && dc.readyState === 'open') {
+                        dc.send(JSON.stringify({
+                            type: 'text',
+                            text: textInput,
+                            x: clickX, y: clickY,
+                            color: color,
+                            font: font
+                        }));
+                    }
+                }
+            }, 50);
+        });
+
+        // EVENT MOUSEDOWN (KHUSUS BRUSH & ERASER)
+        canvas.addEventListener('mousedown', (e) => {
+            if (currentTool === 'text') return; // Abaikan jika mode text
+
+            isDrawing = true;
+            [lastX, lastY] = [e.offsetX, e.offsetY];
+        });
+
+        // EVENT MOUSEMOVE
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDrawing || currentTool === 'text') return;
+            
+            const currX = e.offsetX;
+            const currY = e.offsetY;
+            let finalColor, finalSize;
+
+            if (currentTool === 'eraser') {
+                finalColor = '#ffffff';
+                finalSize = sizeSlider.value * 2;
+            } else {
+                finalColor = colorPicker.value;
+                finalSize = sizeSlider.value;
+            }
+
+            drawLine(lastX, lastY, currX, currY, finalColor, finalSize);
+
+            if (dc && dc.readyState === 'open') {
+                dc.send(JSON.stringify({
+                    type: 'draw',
+                    prevX: lastX, prevY: lastY, currX: currX, currY: currY,
+                    color: finalColor,
+                    lineWidth: finalSize
+                }));
+            }
+            [lastX, lastY] = [currX, currY];
+        });
+
+        canvas.addEventListener('mouseup', () => isDrawing = false);
+        canvas.addEventListener('mouseout', () => isDrawing = false);
+
+    </script>
+</body>
+</html>
